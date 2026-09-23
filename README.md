@@ -2,10 +2,10 @@
 
 # DeLLM
 
-**去除 LLM 生成的中文 Markdown 文档中的 "AI 味"**
+**去除 LLM 生成的中文 Markdown 文档中的“AI 味”**
 
-基于本地规范化规则与可编排的 LLM 改写步骤，将 LLM 输出转化为
-符合中文排版习惯、风格自然的文档。
+通过 Markdown 感知的本地规则和可编排的 LLM 步骤，
+把生成式文本整理为自然、稳定、符合中文排版习惯的文档。
 
 [English](README.en.md) · 简体中文
 
@@ -15,109 +15,119 @@
 
 ## 特性
 
-- **三段式流水线**：预处理（本地规则）→ LLM 改写 → 后处理（本地规则），职责分离
-- **零配置可用**：不加任何配置即可完成引号、缩进、盘古之白等基础清理
-- **Markdown 感知**：基于 AST 识别文档结构，代码块、表格、front matter 不被误伤
-- **缓存友好**：LLM 交互采用"整篇输入 + JSON 结构化输出 + 程序回贴"，最大化 prefix cache 复用
-- **配置驱动**：所有行为由 YAML 描述，支持 profile 切换与 front matter 文档级覆盖
-- **单二进制**：Go 实现，跨平台分发，支持 amd64 / arm64（含 Termux/Android）
+- **三段式流水线**：预处理 → LLM 改写 → 后处理
+- **零配置可用**：默认只启用本地规则，不需要 API key
+- **Markdown 感知**：代码块、HTML、表格、强调标记和 front matter 分区处理
+- **可组合规则**：支持 `quotes`、`indent`、`pangu`、`emphasis_space`、`remove_separators`、`shift_headings`
+- **结构化 LLM 改写**：整篇标注、JSON 输出、ID 与 prefix 校验、按偏移安全回贴
+- **配置驱动**：支持 profile、项目配置、用户配置和文档 front matter 覆盖
+- **机器友好**：支持 stdin/stdout、`--format json`、unified diff 和原子就地写入
+- **跨平台**：Linux、macOS、Windows，以及 Termux Android arm64
 
 ## 安装
 
 ### Go 安装
 
 ```bash
-go install github.com/RobiNexy/de-llm@latest
+go install github.com/RobiNexy/de-llm/cmd@latest
 ```
 
 ### 下载二进制
 
 从 [Releases](https://github.com/RobiNexy/de-llm/releases) 下载对应平台的压缩包。
 
-**Termux / Android（arm64）**：
+Termux / Android arm64：
 
 ```bash
-# 在 Termux 中
-curl -LO https://github.com/RobiNexy/de-llm/releases/latest/download/dellm_linux_arm64.tar.gz
-tar -xzf dellm_linux_arm64.tar.gz && mv dellm_linux_arm64/dellm "$PREFIX/bin/"
+curl -LO https://github.com/RobiNexy/de-llm/releases/latest/download/dellm_android_arm64.tar.gz
+tar -xzf dellm_android_arm64.tar.gz
+mv dellm_android_arm64/dellm "$PREFIX/bin/"
 ```
 
-### 源码构建
+### 从源码构建
 
 ```bash
 git clone https://github.com/RobiNexy/de-llm.git
-cd de-llm && go build -o dellm .
+cd de-llm
+go build -trimpath -o dellm ./cmd
 ```
 
 ## 快速开始
 
 ```bash
-dellm input.md                          # 输出到 stdout
-dellm input.md -i                       # 就地修改
-cat input.md | dellm -                  # 从 stdin 读取
-dellm *.md -i                           # 批量就地修改
-dellm input.md --only quotes,pangu      # 只做引号和盘古之白
-dellm input.md -p full --dry-run        # 预览完整流程会做什么
-dellm input.md --shift-headings=-1 -i   # 所有标题提升一级
-dellm list-rules                        # 列出可用规则
-dellm list-prompts                      # 列出可用提示词
+dellm article.md                         # 输出到 stdout
+dellm article.md -i                      # 原子就地修改
+dellm article.md -o clean.md             # 写入指定文件
+cat article.md | dellm -                 # 从 stdin 读取
+dellm '*.md' -i                          # 批量处理
+dellm article.md --format json           # 机器可解析输出
+dellm article.md --diff                  # 输出 unified diff
+dellm article.md --only quotes,pangu     # 只运行指定规则
+dellm article.md --skip-llm              # 跳过全部 LLM 步骤
+dellm article.md -p full --dry-run       # 预览处理流程和 token 估算
+dellm article.md --shift-headings=-1 -i  # 标题整体提升一级
+dellm list-rules                         # 列出本地规则
+dellm list-prompts                       # 列出提示词
 ```
 
-## 内置本地规则
+日志写入 stderr，不污染文档输出。使用 `--quiet` 静默非错误信息，使用
+`--log-level debug|info|warn|error` 控制日志级别。
 
-| 规则 | 功能 |
+## 默认规则
+
+| 规则 | 作用 |
 |------|------|
-| `quotes` | 半角引号 → 中文弯引号（配对计数，保护英文撇号） |
-| `remove_separators` | 删除章节间的水平分隔线（保护 front matter 与 Setext 标题） |
-| `shift_headings` | 标题级别整体提升或下降（修复 LLM 错位的层级） |
-| `indent` | 段首缩进两个全角空格 |
-| `pangu` | 中英文之间自动插入空格（盘古之白） |
-| `emphasis_space` | `**`、`*` 强调标记与中文之间插入空格 |
+| `quotes` | 半角引号转换为中文弯引号，保护英文撇号 |
+| `remove_separators` | 删除 Markdown 水平分隔线，保护 front matter 和 Setext 标题 |
+| `shift_headings` | 调整 ATX 标题层级，支持越界 clamp/error/skip |
+| `indent` | 在正文段落首行插入两个全角空格 |
+| `pangu` | 在中文与英文、数字之间插入空格 |
+| `emphasis_space` | 在强调标记与中文相邻时补空格 |
+
+默认 profile 只执行本地规则，因此不配置 LLM 也可以直接使用。
 
 ## 配置
 
-配置查找顺序：`--config` → `./dellm.yaml` → 逐级向上至 git 根 → `~/.config/dellm/config.yaml`。
-合并优先级：**CLI flags > front matter > 项目配置 > 用户配置 > 内置默认**。
+配置优先级从低到高为：
 
-最小配置示例（启用 LLM 改写，使用 DeepSeek）：
+```text
+内置默认 → ~/.config/dellm/config.yaml → 项目 dellm.yaml
+→ Markdown front matter → CLI flags
+```
+
+最小 LLM 配置示例：
 
 ```yaml
 version: 1
 
 profiles:
   full:
-    preprocess:
-      - remove_separators
+    preprocess: [remove_separators]
     llm_steps:
-      - name: "重写标题"
+      - name: rewrite headings
         action: rewrite
         target: heading
-        detect: false
         filter: { level: [1, 2, 3] }
         prompt: { rewrite: rewrite_heading }
-      - name: "去掉转折对比句式"
+      - name: remove contrasting patterns
         action: rewrite
         target: paragraph
         detect: true
         prompt:
           detect: detect_contrasting
           rewrite: rewrite_contrasting
-    postprocess:
-      - quotes
-      - indent
-      - pangu
-      - emphasis_space
+    postprocess: [quotes, indent, pangu, emphasis_space]
 
 llm:
   providers:
     default:
       type: openai
-      base_url: "https://api.deepseek.com/v1"
+      base_url: https://api.deepseek.com/v1
       api_key: "${DEEPSEEK_API_KEY}"
-      model: "deepseek-chat"
+      model: deepseek-chat
 ```
 
-在文档 front matter 中做文档级覆盖：
+文档可以通过 front matter 覆盖 profile、规则选择和规则参数：
 
 ```markdown
 ---
@@ -125,61 +135,58 @@ dellm:
   profile: quick
   skip: [indent]
 ---
-
-# 正文
 ```
-
-## LLM 交互模式
-
-`rewrite` 动作采用**整篇标注 + JSON 结构化输出 + 程序回贴**：
-
-```
-原文 → 标注段落号 [P1]/[H1] → 整篇发给 LLM
-     → LLM 返回 JSON（id + prefix + 新文本）
-     → 程序校验 id 与前缀 → 按位置从后向前回贴
-```
-
-该模式使同一 step 内的多轮调用（检测轮 → 改写轮）共享相同的 prompt
-前缀，最大化 API 端 prefix cache 的命中率，直接降低费用。
 
 ## 自定义提示词
 
-在 `./prompts/` 下放置 Markdown 文件（YAML front matter + text/template 正文），
-同名覆盖内置提示词：
+在项目的 `prompts/` 目录放置带 YAML front matter 的 Markdown 模板即可覆盖或新增提示词：
 
 ```markdown
 ---
 name: my_style
-description: 我的自定义风格
+description: 我的写作风格
 version: 1
 params:
   required: [annotated_doc, target_nodes]
 ---
 
-请按以下风格改写以下段落：
+请按指定风格改写以下内容：
 
 {{ .annotated_doc }}
 
-目标段落：
+目标节点：
 {{ .target_nodes }}
 ```
 
-## 与设计文档的已知偏差
+## 架构
 
-- **中文标点与 ASCII 之间不插空格**：设计文档 §6.7 的规则表要求中文标点
-  （含弯引号）与 ASCII 字母数字之间插入空格，但这会产生 `mmap 。`、
-  `“ hello ”` 这类破坏"符合中文排版习惯"目标（§1.1）的输出。实现采用
-  排版惯例（pangu.js 行为）：全角标点紧贴前后字符，仅汉字触发插入。
-- **配置管理未使用 viper**：profile 的"整体替换"合并语义 viper 不支持，
-  仍需手写合并逻辑；改用 `gopkg.in/yaml.v3` 直接反序列化到强类型结构，
-  避免 map 往返的类型损伤。
+```text
+cmd/                  可执行程序入口
+internal/command/     CLI 命令薄壳
+pkg/core/             Document、RegionMap、AnnotatedDoc
+pkg/parser/           goldmark Markdown 解析与区域标注
+pkg/rule/             本地规则和规则注册表
+pkg/llm/              Provider、Step、Prompt 和 JSON 回贴
+pkg/pipeline/         预处理、LLM、后处理编排
+pkg/config/           配置层叠与 front matter
+pkg/output/           text/json 输出格式化
+```
 
-## 开发
+核心包不依赖 CLI，可以独立测试和复用。
+
+## 开发与验证
 
 ```bash
-go test ./...        # 全部测试（含 golden file 与集成测试）
-go test -race ./...  # 竞态检测
-go vet ./...         # 静态检查
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./...
+```
+
+发布构建：
+
+```bash
+./scripts/build-release.sh v0.2.0 dist
 ```
 
 ## 许可证

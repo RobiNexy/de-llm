@@ -53,6 +53,9 @@ jobs:
         include:
           - goos: linux
             goarch: arm64
+          # Native Android executable for Termux on 64-bit ARM devices.
+          - goos: android
+            goarch: arm64
           - goos: linux
             goarch: amd64
           - goos: darwin
