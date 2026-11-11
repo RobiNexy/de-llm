@@ -99,11 +99,14 @@ func TestApplyRewritesPrefixValidation(t *testing.T) {
 		{ID: "P9", Prefix: "", Text: "改写三"},            // id 不存在 → 跳过
 		{ID: "P3", Prefix: "", Text: "   "},            // 空 text → 跳过
 	}
-	result, warnings := ApplyRewrites(doc, rewrites)
+	result, applied, warnings := ApplyRewrites(doc, rewrites)
 
 	want := "改写一\n\n第二个段落的内容足够长可以校验。\n\n第三个段落的内容足够长可以校验。\n"
 	if string(result) != want {
 		t.Errorf("回贴结果错误:\n得到 %q\n期望 %q", result, want)
+	}
+	if applied != 1 {
+		t.Errorf("实际回贴数 %d != 1", applied)
 	}
 	if len(warnings) != 3 {
 		t.Fatalf("warnings 数量 %d != 3: %v", len(warnings), warnings)
@@ -113,13 +116,16 @@ func TestApplyRewritesPrefixValidation(t *testing.T) {
 func TestApplyRewritesBackToFront(t *testing.T) {
 	doc := annotateThreeParas(t)
 	rewrites := []Rewrite{
-		{ID: "P1", Prefix: "", Text: "A"},
-		{ID: "P2", Prefix: "", Text: "B"},
-		{ID: "P3", Prefix: "", Text: "C"},
+		{ID: "P1", Prefix: doc.NodeByID["P1"].Prefix, Text: "A"},
+		{ID: "P2", Prefix: doc.NodeByID["P2"].Prefix, Text: "B"},
+		{ID: "P3", Prefix: doc.NodeByID["P3"].Prefix, Text: "C"},
 	}
-	result, warnings := ApplyRewrites(doc, rewrites)
+	result, applied, warnings := ApplyRewrites(doc, rewrites)
 	if len(warnings) != 0 {
 		t.Fatalf("意外 warnings: %v", warnings)
+	}
+	if applied != 3 {
+		t.Fatalf("实际回贴数 %d != 3", applied)
 	}
 	want := "A\n\nB\n\nC\n"
 	if string(result) != want {
@@ -130,12 +136,15 @@ func TestApplyRewritesBackToFront(t *testing.T) {
 func TestApplyRewritesDuplicateID(t *testing.T) {
 	doc := annotateThreeParas(t)
 	rewrites := []Rewrite{
-		{ID: "P1", Prefix: "", Text: "甲"},
-		{ID: "P1", Prefix: "", Text: "乙"},
+		{ID: "P1", Prefix: doc.NodeByID["P1"].Prefix, Text: "甲"},
+		{ID: "P1", Prefix: doc.NodeByID["P1"].Prefix, Text: "乙"},
 	}
-	result, warnings := ApplyRewrites(doc, rewrites)
+	result, applied, warnings := ApplyRewrites(doc, rewrites)
 	if string(result) != "甲\n\n第二个段落的内容足够长可以校验。\n\n第三个段落的内容足够长可以校验。\n" {
 		t.Errorf("重复 id 应只应用首个: %q", result)
+	}
+	if applied != 1 {
+		t.Errorf("实际回贴数 %d != 1", applied)
 	}
 	if len(warnings) != 1 {
 		t.Errorf("重复 id 应产生 1 条 warning，得到 %d", len(warnings))
@@ -269,5 +278,66 @@ func TestStepEmptyDetectionResult(t *testing.T) {
 	}
 	if string(result) != "正文。\n" {
 		t.Errorf("结果错误: %q", result)
+	}
+}
+
+func TestApplyRewritesRejectsEmptyPrefix(t *testing.T) {
+	doc := annotateThreeParas(t)
+	result, applied, warnings := ApplyRewrites(doc, []Rewrite{
+		{ID: "P1", Prefix: "", Text: "改写"},
+	})
+	if string(result) != threeParaSrc {
+		t.Errorf("空前缀不应回贴: %q", result)
+	}
+	if applied != 0 {
+		t.Errorf("实际回贴数 %d != 0", applied)
+	}
+	if len(warnings) != 1 {
+		t.Errorf("空前缀应产生 1 条 warning，得到 %d", len(warnings))
+	}
+}
+
+func TestApplyRewritesHeadingStructure(t *testing.T) {
+	src := []byte("# 原标题\n\n正文。\n")
+	doc := markdown.AnnotateDocument(src, "heading")
+	prefix := doc.NodeByID["H1"].Prefix
+
+	// 级别变化 → 拒绝。
+	result, applied, warnings := ApplyRewrites(doc, []Rewrite{
+		{ID: "H1", Prefix: prefix, Text: "## 新标题"},
+	})
+	if string(result) != string(src) {
+		t.Errorf("级别变化不应回贴: %q", result)
+	}
+	if applied != 0 || len(warnings) != 1 {
+		t.Errorf("级别变化应拒绝: applied=%d warnings=%v", applied, warnings)
+	}
+
+	// 保持级别 → 接受。
+	result, applied, warnings = ApplyRewrites(doc, []Rewrite{
+		{ID: "H1", Prefix: prefix, Text: "# 新标题"},
+	})
+	if string(result) != "# 新标题\n\n正文。\n" {
+		t.Errorf("合法标题改写结果错误: %q", result)
+	}
+	if applied != 1 || len(warnings) != 0 {
+		t.Errorf("合法标题改写应成功: applied=%d warnings=%v", applied, warnings)
+	}
+}
+
+func TestApplyRewritesSetextHeadingRejectsATX(t *testing.T) {
+	src := []byte("标题\n===\n\n正文。\n")
+	doc := markdown.AnnotateDocument(src, "heading")
+	if len(doc.Nodes) != 1 {
+		t.Fatalf("Setext 标题标注数 %d != 1", len(doc.Nodes))
+	}
+	result, applied, warnings := ApplyRewrites(doc, []Rewrite{
+		{ID: "H1", Prefix: doc.Nodes[0].Prefix, Text: "# 标题"},
+	})
+	if string(result) != string(src) {
+		t.Errorf("Setext 不应被改写为 ATX: %q", result)
+	}
+	if applied != 0 || len(warnings) != 1 {
+		t.Errorf("Setext 改写应拒绝: applied=%d warnings=%v", applied, warnings)
 	}
 }

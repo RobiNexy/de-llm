@@ -38,6 +38,10 @@ type Step struct {
 	RateLimit  *RateLimiter
 	MaxRetries int
 
+	// 提示词 suggested.temperature 或 step overrides 解析后的调用温度。
+	DetectTemperature  *float64
+	RewriteTemperature *float64
+
 	// Reporter 接收 warning；为 nil 时输出到标准日志。
 	Reporter func(format string, args ...any)
 
@@ -65,6 +69,7 @@ type StepConfig struct {
 	Prompt    PromptCfg      `yaml:"prompt"`
 	Params    map[string]any `yaml:"params"`
 	Overrides Overrides      `yaml:"overrides"`
+	Provider  string         `yaml:"provider"` // 为空时使用 llm.providers.default
 }
 
 // PromptCfg 引用两个提示词名。
@@ -127,6 +132,7 @@ func (s *Step) executeRewrite(ctx context.Context, doc []byte) ([]byte, error) {
 		resp, err := s.complete(ctx, &CompletionRequest{
 			Messages:       []Message{{Role: "user", Content: detectPrompt}},
 			ResponseFormat: FormatJSON,
+			Temperature:    s.DetectTemperature,
 		})
 		if err != nil {
 			return nil, err
@@ -163,6 +169,7 @@ func (s *Step) executeRewrite(ctx context.Context, doc []byte) ([]byte, error) {
 	resp, err := s.complete(ctx, &CompletionRequest{
 		Messages:       []Message{{Role: "user", Content: rewritePrompt}},
 		ResponseFormat: FormatJSON,
+		Temperature:    s.RewriteTemperature,
 	})
 	if err != nil {
 		return nil, err
@@ -173,8 +180,8 @@ func (s *Step) executeRewrite(ctx context.Context, doc []byte) ([]byte, error) {
 	}
 
 	// 4. 回贴。
-	result, warnings := ApplyRewrites(annotated, rewrites)
-	s.NodesRewritten = len(rewrites)
+	result, applied, warnings := ApplyRewrites(annotated, rewrites)
+	s.NodesRewritten = applied
 	for _, w := range warnings {
 		s.warn("llm step %q 改写轮: %s", s.Name, w)
 	}
@@ -191,6 +198,7 @@ func (s *Step) executeFullRewrite(ctx context.Context, doc []byte) ([]byte, erro
 	resp, err := s.complete(ctx, &CompletionRequest{
 		Messages: []Message{{Role: "user", Content: rendered}},
 		// full_rewrite 不用 JSON mode（设计文档 §7.3.2）。
+		Temperature: s.RewriteTemperature,
 	})
 	if err != nil {
 		return nil, err

@@ -51,18 +51,52 @@ func ValidateMatches(doc *markdown.AnnotatedDoc, matches []DetectMatch) ([]*mark
 
 // prefixMatches 双向前缀比较（归一化换行后）：
 // LLM 可能返回比 15 字符更短或更长的前缀，双向容忍降低误拒。
+// 空前缀不接受：它会让校验退化为仅检查 id。
 func prefixMatches(expected, got string) bool {
 	if got == "" {
-		return true
+		return false
 	}
 	e, g := markdown.NormalizePrefix(expected), markdown.NormalizePrefix(got)
 	return strings.HasPrefix(e, g) || strings.HasPrefix(g, e)
 }
 
+// validateRewrite 校验回贴文本是否保持节点结构。
+// 标题是最容易被 LLM 改坏的结构：ATX 标题必须保留相同数量的 #，
+// Setext 标题不能被改写成 ATX。
+func validateRewrite(node *markdown.AnnotatedNode, text string) error {
+	if node.Type != "heading" {
+		return nil
+	}
+	if strings.ContainsAny(text, "\r\n") {
+		return fmt.Errorf("标题改写不能包含换行")
+	}
+	originalATX := strings.HasPrefix(node.Text, "#")
+	rewriteATX := strings.HasPrefix(text, "#")
+	if !originalATX {
+		if rewriteATX {
+			return fmt.Errorf("Setext 标题不能改写为 ATX 标题")
+		}
+		return nil
+	}
+	level := 0
+	for level < len(text) && text[level] == '#' {
+		level++
+	}
+	if level != node.Level {
+		return fmt.Errorf("标题级别不匹配（期望 %d 个 #，实际 %d 个）", node.Level, level)
+	}
+	if level < len(text) && text[level] != ' ' && text[level] != '\t' {
+		return fmt.Errorf("标题 # 后必须是空格或行尾")
+	}
+	return nil
+}
+
 // ApplyRewrites 将改写结果回贴到原文（设计文档 §7.5）：
-//   - 未知 id / prefix 不匹配 / 空 text → 跳过 + warning
+//   - 未知 id / prefix 为空或不匹配 / 空 text / 结构破坏 → 跳过 + warning
 //   - 从后向前替换，保证前面替换不影响后面节点偏移
-func ApplyRewrites(doc *markdown.AnnotatedDoc, rewrites []Rewrite) ([]byte, []Warning) {
+//
+// 返回值 applied 是实际成功回贴的节点数，stats 应使用它而不是原始响应条数。
+func ApplyRewrites(doc *markdown.AnnotatedDoc, rewrites []Rewrite) ([]byte, int, []Warning) {
 	var warnings []Warning
 
 	// 过滤无效项并按原文位置降序。
@@ -88,7 +122,11 @@ func ApplyRewrites(doc *markdown.AnnotatedDoc, rewrites []Rewrite) ([]byte, []Wa
 		}
 		if !prefixMatches(node.Prefix, rw.Prefix) {
 			warnings = append(warnings, Warning{NodeID: rw.ID,
-				Message: fmt.Sprintf("prefix 不匹配（期望 %q，实际 %q）", rw.Prefix, node.Prefix)})
+				Message: fmt.Sprintf("prefix 为空或不匹配（期望 %q，实际 %q）", node.Prefix, rw.Prefix)})
+			continue
+		}
+		if err := validateRewrite(node, rw.Text); err != nil {
+			warnings = append(warnings, Warning{NodeID: rw.ID, Message: err.Error()})
 			continue
 		}
 		seen[rw.ID] = true
@@ -101,5 +139,5 @@ func ApplyRewrites(doc *markdown.AnnotatedDoc, rewrites []Rewrite) ([]byte, []Wa
 		result = append(result[:v.node.Start],
 			append([]byte(v.text), result[v.node.End:]...)...)
 	}
-	return result, warnings
+	return result, len(valids), warnings
 }
