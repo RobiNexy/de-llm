@@ -69,17 +69,16 @@ func (r *removeSeparatorsRule) Transform(ctx Context, rm *markdown.RegionMap) ([
 		inFrontMatter := fmEndLine >= 0 && i <= fmEndLine
 
 		// 围栏状态机。
-		if ch, n := fenceOf(bytes.TrimLeft(trimmed, "\t")); ch != 0 || inFence {
+		fenceLine := bytes.TrimLeft(trimmed, " \t")
+		openCh, openN := markdown.FenceOf(fenceLine)
+		closeCh, closeN := markdown.ClosingFenceOf(fenceLine)
+		if openCh != 0 || inFence {
 			if !inFence {
-				if ch != 0 {
-					inFence = true
-					fenceChar = ch
-					fenceLen = n
-				}
-			} else {
-				if ch == fenceChar && n >= fenceLen {
-					inFence = false
-				}
+				inFence = true
+				fenceChar = openCh
+				fenceLen = openN
+			} else if closeCh == fenceChar && closeN >= fenceLen {
+				inFence = false
 			}
 			prevNonBlank = false
 			continue
@@ -179,24 +178,4 @@ func isPureDashRun(line []byte) bool {
 
 func isBlankMdLine(line []byte) bool {
 	return len(bytes.TrimSpace(line)) == 0
-}
-
-// fenceOf 识别围栏行：返回围栏字符与长度（不足 3 返回 0）。
-// 与 markdown 包中同名逻辑一致（围栏语义需在多处使用，暂不导出以收窄 API）。
-func fenceOf(trimmed []byte) (byte, int) {
-	if len(trimmed) == 0 {
-		return 0, 0
-	}
-	ch := trimmed[0]
-	if ch != '`' && ch != '~' {
-		return 0, 0
-	}
-	n := 0
-	for n < len(trimmed) && trimmed[n] == ch {
-		n++
-	}
-	if n < 3 {
-		return 0, 0
-	}
-	return ch, n
 }

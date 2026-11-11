@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 )
 
 // 节点类型常量，与配置中 target 字段对应。
@@ -57,33 +58,36 @@ func AnnotateDocument(source []byte, target string) *AnnotatedDoc {
 
 	kindFor := func(n ast.Node) (kind, id string, ok bool) {
 		switch n.(type) {
-		case *ast.Paragraph:
-			if target != TargetParagraph {
-				return "", "", false
-			}
-			// 列表项与引用块内的段落归其容器（Ln/Qn），不重复作为段落标注。
-			for p := n.Parent(); p != nil; p = p.Parent() {
-				switch p.(type) {
-				case *ast.ListItem, *ast.Blockquote:
+		case *ast.Paragraph, *ast.TextBlock:
+			// 段落目标只标注顶层正文段落；引用块和列表项由各自目标处理。
+			// 列表项与引用块目标标注其直接子文本块，多段容器因此逐段可寻址，
+			// 不会用第一个段落覆盖整个容器。
+			switch target {
+			case TargetParagraph:
+				if _, isTextBlock := n.(*ast.TextBlock); isTextBlock {
 					return "", "", false
 				}
+				for p := n.Parent(); p != nil; p = p.Parent() {
+					switch p.(type) {
+					case *ast.ListItem, *ast.Blockquote:
+						return "", "", false
+					}
+				}
+				return TargetParagraph, "P", true
+			case TargetListItem:
+				if _, ok := n.Parent().(*ast.ListItem); ok {
+					return TargetListItem, "L", true
+				}
+			case TargetBlockquote:
+				if _, ok := n.Parent().(*ast.Blockquote); ok {
+					return TargetBlockquote, "Q", true
+				}
 			}
-			return TargetParagraph, "P", true
 		case *ast.Heading:
 			if target != TargetHeading {
 				return "", "", false
 			}
 			return TargetHeading, "H", true
-		case *ast.ListItem:
-			if target != TargetListItem {
-				return "", "", false
-			}
-			return TargetListItem, "L", true
-		case *ast.Blockquote:
-			if target != TargetBlockquote {
-				return "", "", false
-			}
-			return TargetBlockquote, "Q", true
 		}
 		return "", "", false
 	}
@@ -154,34 +158,28 @@ func nodeExtent(n ast.Node, source []byte, kind string) (start, end, level int) 
 		}
 		return s, end, node.Level
 	case *ast.Paragraph:
-		segs := node.Lines()
-		if segs.Len() == 0 {
-			return -1, -1, 0
-		}
-		return segs.At(0).Start, segs.At(segs.Len() - 1).Stop, 0
-	case *ast.ListItem:
-		// 取列表项内第一个块级子节点的文本范围（不含 "- "/"1. " 标记）。
-		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-			if para, ok := c.(*ast.Paragraph); ok {
-				segs := para.Lines()
-				if segs.Len() > 0 {
-					return segs.At(0).Start, segs.At(segs.Len() - 1).Stop, 0
-				}
-			}
-		}
-		return -1, -1, 0
-	case *ast.Blockquote:
-		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-			if para, ok := c.(*ast.Paragraph); ok {
-				segs := para.Lines()
-				if segs.Len() > 0 {
-					return segs.At(0).Start, segs.At(segs.Len() - 1).Stop, 0
-				}
-			}
-		}
-		return -1, -1, 0
+		return textBlockExtent(node)
+	case *ast.TextBlock:
+		return textBlockExtent(node)
 	}
 	return -1, -1, 0
+}
+
+// textBlockExtent 返回 Paragraph/TextBlock 的文本范围。
+func textBlockExtent(node ast.Node) (start, end, level int) {
+	var segs *text.Segments
+	switch n := node.(type) {
+	case *ast.Paragraph:
+		segs = n.Lines()
+	case *ast.TextBlock:
+		segs = n.Lines()
+	default:
+		return -1, -1, 0
+	}
+	if segs == nil || segs.Len() == 0 {
+		return -1, -1, 0
+	}
+	return segs.At(0).Start, segs.At(segs.Len() - 1).Stop, 0
 }
 
 // renderAnnotated 在每个节点起始处插入 [ID] 标注前缀。

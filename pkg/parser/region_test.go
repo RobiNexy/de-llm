@@ -182,3 +182,68 @@ func TestFormatTargets(t *testing.T) {
 		t.Errorf("target_nodes = %q", out)
 	}
 }
+
+func TestRegionMapLinkDestinationIsSyntax(t *testing.T) {
+	src := []byte(`[link](https://example.com/?q="x")`)
+	rm, err := BuildRegionMap(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlQuote := strings.Index(string(src), `"x"`)
+	if urlQuote < 0 {
+		t.Fatal("测试文本缺少 URL 引号")
+	}
+	if got := regionOf(t, rm, `q="x"`); got != RegionSyntax {
+		t.Errorf("链接目标引号 → %v, 期望 syntax", got)
+	}
+	if got := regionOf(t, rm, "link"); got != RegionText {
+		t.Errorf("链接文本 → %v, 期望 text", got)
+	}
+}
+
+func TestRegionMapFenceClosingRequiresBlankTail(t *testing.T) {
+	src := []byte("```go\ncode\n``` not close\n---\n```\n")
+	rm, err := BuildRegionMap(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := regionOf(t, rm, "---"); got != RegionCode {
+		t.Errorf("围栏内 --- → %v, 期望 code", got)
+	}
+}
+
+func TestAnnotateLooseListItems(t *testing.T) {
+	src := []byte("- 第一段。\n\n  第二段。\n\n- 另一个列表项。\n")
+	doc := AnnotateDocument(src, "list_item")
+	if len(doc.Nodes) != 3 {
+		t.Fatalf("松散列表标注数 %d != 3: %+v", len(doc.Nodes), doc.Nodes)
+	}
+	want := []string{"第一段。", "第二段。", "另一个列表项。"}
+	for i, n := range doc.Nodes {
+		if n.Text != want[i] {
+			t.Errorf("节点 %d = %q, 期望 %q", i, n.Text, want[i])
+		}
+	}
+}
+
+func TestAnnotateTightListItems(t *testing.T) {
+	src := []byte("- 第一项\n- 第二项\n")
+	doc := AnnotateDocument(src, "list_item")
+	if len(doc.Nodes) != 2 {
+		t.Fatalf("紧凑列表标注数 %d != 2", len(doc.Nodes))
+	}
+	if doc.Nodes[0].Text != "第一项" || doc.Nodes[1].Text != "第二项" {
+		t.Errorf("紧凑列表文本错误: %+v", doc.Nodes)
+	}
+}
+
+func TestAnnotateMultiParagraphBlockquote(t *testing.T) {
+	src := []byte("> 第一段。\n>\n> 第二段。\n")
+	doc := AnnotateDocument(src, "blockquote")
+	if len(doc.Nodes) != 2 {
+		t.Fatalf("多段引用标注数 %d != 2: %+v", len(doc.Nodes), doc.Nodes)
+	}
+	if doc.Nodes[0].Text != "第一段。" || doc.Nodes[1].Text != "第二段。" {
+		t.Errorf("引用文本错误: %+v", doc.Nodes)
+	}
+}

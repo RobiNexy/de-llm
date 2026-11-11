@@ -120,6 +120,12 @@ func New(name string, cfg RuleConfig) (Rule, error) {
 	return f(cfg)
 }
 
+// Exists 报告规则名是否已注册。
+func Exists(name string) bool {
+	_, ok := registry[name]
+	return ok
+}
+
 // Names 返回所有已注册规则名（升序）。
 func Names() []string {
 	names := make([]string, 0, len(registry))

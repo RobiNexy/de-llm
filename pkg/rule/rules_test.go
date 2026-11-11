@@ -198,3 +198,47 @@ func TestShiftHeadingsPreservesOtherLines(t *testing.T) {
 		t.Errorf("得到 %q 期望 %q", result, want)
 	}
 }
+
+func TestRemoveSeparatorsFenceTrailingText(t *testing.T) {
+	r, _ := New("remove_separators", RuleConfig{})
+	src := []byte("```go\ncode\n``` not close\n---\n```\n")
+	ctx := newTestContext()
+	rm, _ := markdownBuild(src)
+	result, err := r.Transform(ctx, rm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != string(src) {
+		t.Errorf("围栏内 --- 不应被删除: %q", result)
+	}
+}
+
+func TestIndentSkipsLooseListItems(t *testing.T) {
+	r, _ := New("indent", RuleConfig{})
+	src := []byte("- 第一段。\n\n  第二段。\n\n正文。\n")
+	ctx := newTestContext()
+	rm, _ := markdownBuild(src)
+	result, err := r.Transform(ctx, rm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "- 第一段。\n\n  第二段。\n\n\u3000\u3000正文。\n"
+	if string(result) != want {
+		t.Errorf("松散列表不应缩进:\n得到 %q\n期望 %q", result, want)
+	}
+}
+
+func TestIndentListScope(t *testing.T) {
+	r, err := New("indent", RuleConfig{"scope": []any{"list_item"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := []byte("- 第一段。\n\n  第二段。\n\n正文。\n")
+	ctx := newTestContext()
+	rm, _ := markdownBuild(src)
+	result, _ := r.Transform(ctx, rm)
+	want := "- \u3000\u3000第一段。\n\n  \u3000\u3000第二段。\n\n正文。\n"
+	if string(result) != want {
+		t.Errorf("list_item scope 结果错误:\n得到 %q\n期望 %q", result, want)
+	}
+}

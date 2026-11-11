@@ -45,8 +45,8 @@ const (
 )
 
 // isIdeograph 判断是否为汉字（触发插入）。
-// 注：设计文档 §6.7 的"中文字符"范围含中文标点与全角形式，
-// 此处拆分为触发插入的汉字子集与不触发的标点子集（裁决说明见下）。
+// 中文标点与全角形式不触发插入：它们与 ASCII 之间保持原样，
+// 避免在“mmap。”这类正常排印中制造多余空格。
 func isIdeograph(r rune) bool {
 	switch {
 	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
@@ -54,21 +54,6 @@ func isIdeograph(r rune) bool {
 	case r >= 0x3400 && r <= 0x4DBF: // CJK Extension A
 		return true
 	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility
-		return true
-	}
-	return false
-}
-
-// isCJKPunct 判断是否为中文标点/全角形式（不触发插入）。
-func isCJKPunct(r rune) bool {
-	switch {
-	case r >= 0x3001 && r <= 0x303F: // CJK 标点（排除 0x3000 全角空格）
-		return true
-	case r >= 0xFF00 && r <= 0xFFEF: // 全角形式
-		return true
-	case r >= 0x201C && r <= 0x201D: // 中文双引号
-		return true
-	case r >= 0x2018 && r <= 0x2019: // 中文单引号
 		return true
 	}
 	return false

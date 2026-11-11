@@ -18,11 +18,11 @@ type Document struct {
 
 // Parse builds the AST and region map for source.
 func Parse(source []byte) (*Document, error) {
-	regions, err := parser.BuildRegionMap(source)
+	astNode, regions, err := parser.ParseDocument(source)
 	if err != nil {
 		return nil, err
 	}
-	return &Document{Source: source, AST: parser.Parse(source), Regions: regions}, nil
+	return &Document{Source: source, AST: astNode, Regions: regions}, nil
 }
 
 // RegionMap and Region are aliases to keep the core contract and the current

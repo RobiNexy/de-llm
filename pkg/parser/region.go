@@ -25,19 +25,26 @@ import (
 type RegionType int
 
 const (
-	RegionText           RegionType = iota // 正文文本
-	RegionCode                             // 代码块 / 行内代码
-	RegionHTML                             // HTML 块 / 行内 HTML
-	RegionHeading                          // 标题文本
-	RegionListItem                         // 列表项文本
-	RegionTable                            // 表格内容
-	RegionBlockquote                       // 引用块内容
-	RegionFrontMatter                      // YAML front matter
-	RegionEmphasisMarker                   // ** / * 标记符号本身
+	// RegionSyntax is the zero value and the default for every byte that is
+	// not explicitly classified as prose, code, HTML or front matter. It also
+	// covers Markdown syntax that is not represented by an ast.Text node,
+	// such as link destinations, link titles and reference definitions.
+	RegionSyntax         RegionType = iota
+	RegionText                      // 正文文本
+	RegionCode                      // 代码块 / 行内代码
+	RegionHTML                      // HTML 块 / 行内 HTML
+	RegionHeading                   // 标题文本
+	RegionListItem                  // 列表项文本
+	RegionTable                     // 表格内容
+	RegionBlockquote                // 引用块内容
+	RegionFrontMatter               // YAML front matter
+	RegionEmphasisMarker            // ** / * 标记符号本身
 )
 
 func (t RegionType) String() string {
 	switch t {
+	case RegionSyntax:
+		return "syntax"
 	case RegionText:
 		return "text"
 	case RegionCode:
@@ -73,6 +80,7 @@ type Region struct {
 type ParaStart struct {
 	Offset       int
 	InBlockquote bool
+	InListItem   bool
 }
 
 // RegionMap 描述整篇源文本的结构区域划分。
@@ -90,7 +98,7 @@ type RegionMap struct {
 	ParaStarts []ParaStart
 }
 
-// TypeAt returns the structure type covering off, or RegionText when the
+// TypeAt returns the structure type covering off, or RegionSyntax when the
 // offset is outside the document. Returning a value instead of an error keeps
 // character rules convenient while RegionAt remains available to callers that
 // need to distinguish an uncovered offset.
@@ -98,7 +106,7 @@ func (m *RegionMap) TypeAt(off int) RegionType {
 	if r, ok := m.RegionAt(off); ok {
 		return r.Type
 	}
-	return RegionText
+	return RegionSyntax
 }
 
 // FilterByType returns copies of all regions whose type is in types.
@@ -154,15 +162,29 @@ func Parse(source []byte) ast.Node {
 	return NewParser().Parser().Parse(reader)
 }
 
+// ParseDocument parses source once and returns both the AST and its region
+// map. Callers that need both avoid the double parse previously performed by
+// BuildRegionMap followed by Parse.
+func ParseDocument(source []byte) (ast.Node, *RegionMap, error) {
+	doc := Parse(source)
+	return doc, buildRegionMap(source, doc), nil
+}
+
 // BuildRegionMap 按设计文档 §5.4 构建 RegionMap。
 //
 // 写入顺序即优先级（后写覆盖先写）：
 // 围栏代码块行扫描 → AST 遍历 → front matter（最后，防 AST 误识内部内容）。
 func BuildRegionMap(source []byte) (*RegionMap, error) {
-	rm := &RegionMap{Source: source}
-	classes := make([]RegionType, len(source)) // 零值即 RegionText
+	_, rm, err := ParseDocument(source)
+	return rm, err
+}
 
-	doc := Parse(source)
+func buildRegionMap(source []byte, doc ast.Node) *RegionMap {
+	rm := &RegionMap{Source: source}
+	// 零值即 RegionSyntax：未被 AST 叶子节点显式标记的字节按语法处理，
+	// 不会被 quotes/pangu 等正文规则修改。
+	classes := make([]RegionType, len(source))
+
 	markFencedCodeBlocks(source, classes)
 	walkRegions(doc, source, classes, rm)
 	collectParaStarts(doc, rm)
@@ -173,7 +195,7 @@ func BuildRegionMap(source []byte) (*RegionMap, error) {
 	}
 
 	rm.Regions = compress(classes)
-	return rm, nil
+	return rm
 }
 
 // walkRegions 深度优先遍历，将叶子节点区间写入分类数组。
@@ -235,6 +257,9 @@ func setLeaf(n ast.Node, source []byte, classes []RegionType) {
 func classifyByAncestors(n ast.Node) RegionType {
 	for p := n.Parent(); p != nil; p = p.Parent() {
 		switch p.(type) {
+		case *ast.AutoLink:
+			// AutoLink 的目标是 URL，不是正文；避免字符规则改写链接地址。
+			return RegionSyntax
 		case *ast.CodeSpan:
 			return RegionCode
 		case *ast.Heading:
@@ -345,7 +370,7 @@ func markFencedCodeBlocks(source []byte, classes []RegionType) {
 	for i, line := range lines {
 		trimmed := bytes.TrimLeft(line, " \t")
 		if !inBlock {
-			if ch, n := fenceOf(trimmed); ch != 0 {
+			if ch, n := FenceOf(trimmed); ch != 0 {
 				inBlock = true
 				fenceChar = ch
 				fenceLen = n
@@ -353,15 +378,17 @@ func markFencedCodeBlocks(source []byte, classes []RegionType) {
 			}
 			continue
 		}
-		// 块内：整行标记，直到出现不少于开栏长度的同字符围栏。
+		// 块内：整行标记，直到出现不少于开栏长度、且行尾无非空白的同字符围栏。
 		fill(classes, lineOffsets[i], lineOffsets[i]+len(line), RegionCode)
-		if ch, n := fenceOf(trimmed); ch == fenceChar && n >= fenceLen {
+		if ch, n := ClosingFenceOf(trimmed); ch == fenceChar && n >= fenceLen {
 			inBlock = false
 		}
 	}
 }
 
-func fenceOf(trimmed []byte) (byte, int) {
+// FenceOf 识别围栏行：返回围栏字符与长度（不足 3 返回 0）。
+// 开启围栏允许 info string，因此只检查行首连续围栏字符。
+func FenceOf(trimmed []byte) (byte, int) {
 	if len(trimmed) == 0 {
 		return 0, 0
 	}
@@ -379,6 +406,17 @@ func fenceOf(trimmed []byte) (byte, int) {
 	return ch, n
 }
 
+// ClosingFenceOf 识别关闭围栏：行首连续围栏字符之后只能有空格、制表符或
+// 行尾 \r。CommonMark 不允许关闭围栏后出现 info string。
+func ClosingFenceOf(line []byte) (byte, int) {
+	trimmed := bytes.TrimRight(line, " \t\r")
+	ch, n := FenceOf(trimmed)
+	if ch == 0 || n != len(trimmed) {
+		return 0, 0
+	}
+	return ch, n
+}
+
 // collectParaStarts 记录 Paragraph 节点首个文本段的起始偏移。
 func collectParaStarts(doc ast.Node, rm *RegionMap) {
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -389,15 +427,19 @@ func collectParaStarts(doc ast.Node, rm *RegionMap) {
 			segs := p.Lines()
 			if segs.Len() > 0 {
 				inQuote := false
+				inList := false
 				for parent := p.Parent(); parent != nil; parent = parent.Parent() {
-					if _, ok := parent.(*ast.Blockquote); ok {
+					switch parent.(type) {
+					case *ast.Blockquote:
 						inQuote = true
-						break
+					case *ast.ListItem:
+						inList = true
 					}
 				}
 				rm.ParaStarts = append(rm.ParaStarts, ParaStart{
 					Offset:       segs.At(0).Start,
 					InBlockquote: inQuote,
+					InListItem:   inList,
 				})
 			}
 		}

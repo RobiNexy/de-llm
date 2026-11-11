@@ -12,6 +12,7 @@ package rule
 import (
 	"bytes"
 	"fmt"
+	"sort"
 
 	markdown "github.com/RobiNexy/de-llm/pkg/parser"
 	"github.com/yuin/goldmark/ast"
@@ -117,15 +118,21 @@ func (r *shiftHeadingsRule) Transform(ctx Context, rm *markdown.RegionMap) ([]by
 		return src, nil
 	}
 
-	// 从后向前替换 '#' run。
-	out := append([]byte{}, src...)
-	for i := len(changes) - 1; i >= 0; i-- {
-		c := changes[i]
-		newRun := bytes.Repeat([]byte("#"), c.newLevel)
-		out = append(out[:c.start:c.start],
-			append(newRun, out[c.start+c.oldLevel:]...)...)
+	// 单次前向重建：按行首偏移升序写入，避免每次替换复制整篇文档。
+	sort.Slice(changes, func(i, j int) bool { return changes[i].start < changes[j].start })
+	var out bytes.Buffer
+	out.Grow(len(src))
+	prev := 0
+	for _, c := range changes {
+		if c.start < prev {
+			continue
+		}
+		out.Write(src[prev:c.start])
+		out.Write(bytes.Repeat([]byte("#"), c.newLevel))
+		prev = c.start + c.oldLevel
 	}
-	return out, nil
+	out.Write(src[prev:])
+	return out.Bytes(), nil
 }
 
 // atxMarker 返回 ATX 标题 '#' run 的起始偏移；非 ATX（Setext）返回 false。

@@ -71,3 +71,17 @@ func TestQuotesStateResetsAcrossBlankLine(t *testing.T) {
 		t.Errorf("段间状态应重置: %q", result)
 	}
 }
+
+func TestQuotesSkipsLinkDestination(t *testing.T) {
+	r, _ := New("quotes", RuleConfig{})
+	src := []byte(`[link](https://example.com/?q="x")`)
+	ctx := newTestContext()
+	rm, _ := markdownBuild(src)
+	result, err := r.Transform(ctx, rm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != string(src) {
+		t.Errorf("链接目标不应被改写: %q", result)
+	}
+}

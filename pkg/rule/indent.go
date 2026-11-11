@@ -7,7 +7,6 @@ package rule
 
 import (
 	"bytes"
-	"strings"
 	"unicode/utf8"
 
 	markdown "github.com/RobiNexy/de-llm/pkg/parser"
@@ -23,6 +22,7 @@ type indentRule struct {
 	char               string
 	scopeParagraph     bool
 	scopeBlockquote    bool
+	scopeListItem      bool
 	skipFirstParagraph bool
 }
 
@@ -42,6 +42,8 @@ func NewIndentRule(cfg RuleConfig) (Rule, error) {
 			r.scopeParagraph = true
 		case "blockquote":
 			r.scopeBlockquote = true
+		case "list_item":
+			r.scopeListItem = true
 		default:
 			return nil, ErrIndentScope(s)
 		}
@@ -58,7 +60,7 @@ func (errIndentChar) Error() string { return "indent: char 不能为空且必须
 type ErrIndentScope string
 
 func (e ErrIndentScope) Error() string {
-	return "indent: 不支持的 scope: " + string(e) + "（支持 paragraph / blockquote）"
+	return "indent: 不支持的 scope: " + string(e) + "（支持 paragraph / blockquote / list_item）"
 }
 
 func (r *indentRule) Name() string        { return "indent" }
@@ -74,12 +76,19 @@ func (r *indentRule) Transform(ctx Context, rm *markdown.RegionMap) ([]byte, err
 	var insertions []int
 	seenPara := false
 	for _, ps := range rm.ParaStarts {
-		if ps.InBlockquote {
+		switch {
+		case ps.InBlockquote:
 			if !r.scopeBlockquote {
 				continue
 			}
-		} else if !r.scopeParagraph {
-			continue
+		case ps.InListItem:
+			if !r.scopeListItem {
+				continue
+			}
+		default:
+			if !r.scopeParagraph {
+				continue
+			}
 		}
 		if r.skipFirstParagraph && !seenPara {
 			seenPara = true
@@ -89,7 +98,7 @@ func (r *indentRule) Transform(ctx Context, rm *markdown.RegionMap) ([]byte, err
 
 		// 幂等性：段落文本已以缩进字符开头则跳过。
 		rest := src[ps.Offset:]
-		if strings.HasPrefix(string(rest), r.char) {
+		if bytes.HasPrefix(rest, []byte(r.char)) {
 			continue
 		}
 		if ch, _ := utf8.DecodeRune(rest); ch == '\u3000' {
