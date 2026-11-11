@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -90,16 +91,26 @@ func (r *Registry) LoadDirs(dirs []string) error {
 }
 
 func (r *Registry) loadDir(dir string) error {
-	entries, err := fs.ReadDir(osFS{}, dir)
-	if err != nil {
+	dir = expandDir(dir)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
 		// 目录不存在不是错误：用户可能未创建提示词目录。
 		return nil
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
+	var paths []string
+	if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		path := filepath.Join(dir, e.Name())
+		if !d.IsDir() && strings.HasSuffix(path, ".md") {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
 		data, err := readFile(path)
 		if err != nil {
 			return fmt.Errorf("读取提示词 %s: %w", path, err)
@@ -114,6 +125,19 @@ func (r *Registry) loadDir(dir string) error {
 		}
 	}
 	return nil
+}
+
+func expandDir(dir string) string {
+	dir = os.ExpandEnv(dir)
+	if dir == "~" {
+		home, _ := os.UserHomeDir()
+		return home
+	}
+	if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, dir[2:])
+	}
+	return dir
 }
 
 // Parse 解析提示词文件：YAML front matter + text/template 正文。
