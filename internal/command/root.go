@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -139,9 +139,31 @@ func run(cmd *cobra.Command, args []string) error {
 	if flagLogLevel != "debug" && flagLogLevel != "info" && flagLogLevel != "warn" && flagLogLevel != "error" {
 		return cfgErr("不支持的日志级别: %s", flagLogLevel)
 	}
+	if flagVerbose {
+		flagLogLevel = "debug"
+	}
 	// --only / --skip 互斥（设计文档 §4.2）。
 	if flagOnly != "" && flagSkip != "" {
 		return cfgErr("--only 与 --skip 互斥，不能同时指定")
+	}
+	// 写入/输出模式互斥，避免静默优先级覆盖。
+	if flagInPlace && flagOutput != "" {
+		return cfgErr("-i 与 -o 不能同时指定")
+	}
+	if flagInPlace && flagDiff {
+		return cfgErr("-i 与 --diff 不能同时指定")
+	}
+	if flagOutput != "" && flagDiff {
+		return cfgErr("-o 与 --diff 不能同时指定")
+	}
+	if flagFormat == "json" && flagDiff {
+		return cfgErr("--format json 与 --diff 不能同时指定")
+	}
+	if flagDryRun && (flagInPlace || flagOutput != "" || flagDiff) {
+		return cfgErr("--dry-run 不能与 -i、-o 或 --diff 同时指定")
+	}
+	if flagDryRun && flagFormat == "json" {
+		return cfgErr("--dry-run 暂不支持 --format json")
 	}
 
 	// 加载配置（内置默认 ← 用户级 ← 项目级；CLI flags 最高）。
@@ -172,7 +194,45 @@ func run(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return emitOutput(cmd, result, "", &fileResult{orig: source, output: result})
+		if flagDryRun {
+			return nil
+		}
+		return emitOutput(cmd, result.output, "", &fileResult{
+			orig: source, output: result.output, stats: result.stats, warnings: result.warnings,
+		})
+	}
+
+	// 多文件 JSON：一次输出合法数组，而不是拼接多个对象。
+	if flagFormat == "json" && len(args) > 1 && !flagInPlace && flagOutput == "" && !flagDiff && !flagDryRun {
+		results := make([]output.FileResult, 0, len(args))
+		hadFailure := false
+		for _, path := range args {
+			fr, err := processFile(cfg, profileName, path)
+			if err != nil {
+				var exitErr *exitError
+				if errors.As(err, &exitErr) && exitErr.code == exitCfg {
+					return err
+				}
+				hadFailure = true
+				results = append(results, output.FileResult{File: path, Error: err.Error()})
+				continue
+			}
+			results = append(results, output.FileResult{
+				File:     path,
+				Modified: fr.output,
+				Stats:    fr.stats,
+				Warnings: fr.warnings,
+			})
+		}
+		data, err := output.JSONArray(results)
+		if err != nil {
+			return failErr("JSON 输出失败: %v", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		if hadFailure {
+			return failErr("部分文件处理失败")
+		}
+		return nil
 	}
 
 	// 多文件：单文件失败继续（设计文档 §4.5）。
@@ -189,6 +249,9 @@ func run(cmd *cobra.Command, args []string) error {
 			hadFailure = true
 			continue
 		}
+		if flagDryRun {
+			continue
+		}
 		if err := emitOutput(cmd, result.output, path, result); err != nil {
 			cmd.PrintErrf("错误: %s: %v\n", path, err)
 			hadFailure = true
@@ -201,9 +264,11 @@ func run(cmd *cobra.Command, args []string) error {
 }
 
 type fileResult struct {
-	output []byte
-	orig   []byte
-	path   string
+	output   []byte
+	orig     []byte
+	path     string
+	stats    map[string]map[string]int
+	warnings []string
 }
 
 // emitOutput 按模式输出：diff / stdout / -o / -i。
@@ -222,11 +287,16 @@ func emitOutput(cmd *cobra.Command, result []byte, path string, fr *fileResult) 
 		return nil
 	case flagFormat == "json":
 		original := []byte(nil)
+		stats := map[string]map[string]int(nil)
 		warnings := []string(nil)
 		if fr != nil {
 			original = fr.orig
+			stats = fr.stats
+			warnings = fr.warnings
 		}
-		formatted, err := (output.JSONFormatter{}).Format(&output.Result{Original: original, Modified: result, Warnings: warnings})
+		formatted, err := (output.JSONFormatter{}).Format(&output.Result{
+			Original: original, Modified: result, Stats: stats, Warnings: warnings,
+		})
 		if err != nil {
 			return err
 		}
@@ -248,9 +318,10 @@ func emitOutput(cmd *cobra.Command, result []byte, path string, fr *fileResult) 
 // writeFileAtomic 就地写入的安全流程（设计文档 §4.4）：
 // 临时文件 → fsync → rename 原子替换；任何失败删除临时文件，原文件不受影响。
 func writeFileAtomic(path string, data []byte) error {
-	dir := "."
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		dir = path[:i]
+	dir := filepath.Dir(path)
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(dir, ".dellm.tmp.XXXXXX")
 	if err != nil {
@@ -262,6 +333,10 @@ func writeFileAtomic(path string, data []byte) error {
 			os.Remove(tmpName)
 		}
 	}()
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
@@ -277,5 +352,10 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	tmpName = "" // rename 成功，无需清理
+	// 尽力同步目录项，降低崩溃后丢失 rename 的概率；部分平台不支持目录 fsync。
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }

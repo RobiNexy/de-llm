@@ -34,17 +34,33 @@ func processFile(cfg *config.Config, profileName, path string) (*fileResult, err
 	if err != nil {
 		return nil, err
 	}
-	return &fileResult{output: result, orig: source, path: path}, nil
+	return &fileResult{
+		output:   result.output,
+		orig:     source,
+		path:     path,
+		stats:    result.stats,
+		warnings: result.warnings,
+	}, nil
+}
+
+// processResult 是一次文档处理的完整结果，供文本与 JSON 输出共用。
+type processResult struct {
+	output   []byte
+	stats    map[string]map[string]int
+	warnings []string
 }
 
 // processBytes 对一份文档执行完整流程。
-func processBytes(cfg *config.Config, profileName string, source []byte, displayPath string) ([]byte, error) {
+func processBytes(cfg *config.Config, profileName string, source []byte, displayPath string) (*processResult, error) {
 	logf := func(format string, args ...any) {
-		if flagQuiet {
+		if flagQuiet || flagLogLevel == "error" {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[dellm] "+format+"\n", args...)
 	}
+
+	// 每个文件使用独立配置副本：front matter 与 CLI 快捷方式不得污染后续文件。
+	cfg = config.Clone(cfg)
 
 	spec := filterSpec{
 		profile:       profileName,
@@ -83,6 +99,10 @@ func processBytes(cfg *config.Config, profileName string, source []byte, display
 		}
 	}
 
+	if len(spec.only) > 0 && len(spec.skip) > 0 {
+		return nil, failErr("%s: only 与 skip 互斥，不能同时生效", displayPath)
+	}
+
 	profCopy, err := config.CloneProfile(cfg, spec.profile)
 	if err != nil {
 		return nil, cfgErr("%s: %v", displayPath, err)
@@ -98,14 +118,17 @@ func processBytes(cfg *config.Config, profileName string, source []byte, display
 	runCfg := *cfg
 	runCfg.Profiles = map[string]*config.Profile{spec.profile: profCopy}
 
-	p, err := pipeline.Build(&runCfg, spec.profile, pipeline.BuilderOptions{Verbose: flagVerbose || flagLogLevel == "debug"})
+	p, err := pipeline.Build(&runCfg, spec.profile, pipeline.BuilderOptions{
+		Verbose: flagVerbose || flagLogLevel == "debug",
+		DryRun:  flagDryRun,
+	})
 	if err != nil {
 		return nil, cfgErr("%s: %v", displayPath, err)
 	}
 
 	if flagDryRun {
 		fmt.Fprint(os.Stderr, pipeline.DryRunReport(&runCfg, spec.profile, source, p, displayPath))
-		return source, nil
+		return &processResult{output: source}, nil
 	}
 
 	ctx := pipeline.NewContext(nil, flagVerbose)
@@ -120,7 +143,7 @@ func processBytes(cfg *config.Config, profileName string, source []byte, display
 	if flagStats && !flagQuiet {
 		fmt.Fprint(os.Stderr, formatStats(displayPath, ctx, p))
 	}
-	return result, nil
+	return &processResult{output: result, stats: ctx.Stats(), warnings: ctx.Warnings}, nil
 }
 
 // applyShiftHeadingsShortcut 实现 --shift-headings=N（设计文档 §4.3）：

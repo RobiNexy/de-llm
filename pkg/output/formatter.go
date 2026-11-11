@@ -49,6 +49,46 @@ func (JSONFormatter) Format(result *Result) ([]byte, error) {
 	}{string(result.Modified), stats, warnings}, "", "  ")
 }
 
+// FileResult is one entry in a multi-file JSON response.
+type FileResult struct {
+	File     string
+	Modified []byte
+	Stats    map[string]map[string]int
+	Warnings []string
+	Error    string
+}
+
+// JSONArray formats multiple file results as a single JSON array. It is used
+// when --format json receives more than one input file.
+func JSONArray(results []FileResult) ([]byte, error) {
+	type fileJSON struct {
+		File     string                    `json:"file"`
+		Modified string                    `json:"modified,omitempty"`
+		Stats    map[string]map[string]int `json:"stats"`
+		Warnings []string                  `json:"warnings"`
+		Error    string                    `json:"error,omitempty"`
+	}
+	out := make([]fileJSON, 0, len(results))
+	for _, r := range results {
+		stats := r.Stats
+		if stats == nil {
+			stats = map[string]map[string]int{}
+		}
+		warnings := r.Warnings
+		if warnings == nil {
+			warnings = []string{}
+		}
+		out = append(out, fileJSON{
+			File:     r.File,
+			Modified: string(r.Modified),
+			Stats:    stats,
+			Warnings: warnings,
+			Error:    r.Error,
+		})
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
 // Get returns a supported formatter.
 func Get(name string) (Formatter, error) {
 	switch name {
