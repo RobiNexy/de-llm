@@ -89,6 +89,8 @@ type BuilderOptions struct {
 	Verbose bool
 	// OnFailure 覆盖配置的失败策略。
 	OnFailure string
+	// DryRun 只构建计划，不构造 provider、不要求 API key。
+	DryRun bool
 }
 
 // Build 根据配置构建流水线（设计文档 §9.3）。
@@ -112,15 +114,6 @@ func Build(cfg *config.Config, profileName string, opts BuilderOptions) (*Pipeli
 
 	p := &Pipeline{onFailure: onFailure, verbose: opts.Verbose}
 
-	// 解析提示词注册表：内置 + 配置目录（项目优先，§8.4）。
-	reg := prompt.NewRegistry()
-	if err := reg.LoadBuiltin(prompt.Builtin); err != nil {
-		return nil, fmt.Errorf("加载内置提示词失败: %w", err)
-	}
-	if err := reg.LoadDirs(cfg.LLM.Prompts.Dirs); err != nil {
-		return nil, fmt.Errorf("加载外部提示词失败: %w", err)
-	}
-
 	// 预处理与后处理规则。
 	var err error
 	p.preprocess, err = buildRules(prof.Preprocess, cfg.Rules)
@@ -132,10 +125,29 @@ func Build(cfg *config.Config, profileName string, opts BuilderOptions) (*Pipeli
 		return nil, fmt.Errorf("postprocess: %w", err)
 	}
 
-	// LLM 步骤。
+	// 没有 LLM 步骤时不加载提示词、不构造 provider：本地规则不应被
+	// 损坏的自定义提示词或缺失的 API key 阻塞。
+	if len(prof.LLMSteps) == 0 {
+		return p, nil
+	}
+
+	reg := prompt.NewRegistry()
+	if err := reg.LoadBuiltin(prompt.Builtin); err != nil {
+		return nil, fmt.Errorf("加载内置提示词失败: %w", err)
+	}
+	if err := reg.LoadDirs(cfg.LLM.Prompts.Dirs); err != nil {
+		return nil, fmt.Errorf("加载外部提示词失败: %w", err)
+	}
+
+	// 全局限流器由所有步骤共享，避免每个 step 各自获得一份配额。
+	rl, err := llm.NewRateLimiter(cfg.LLM.RateLimit)
+	if err != nil {
+		return nil, err
+	}
+
 	for i := range prof.LLMSteps {
 		sc := prof.LLMSteps[i]
-		step, err := buildStep(sc, cfg, reg, opts)
+		step, err := buildStep(sc, cfg, reg, rl, opts)
 		if err != nil {
 			return nil, fmt.Errorf("llm_step %q: %w", sc.Name, err)
 		}
@@ -145,7 +157,7 @@ func Build(cfg *config.Config, profileName string, opts BuilderOptions) (*Pipeli
 }
 
 // buildStep 构造单个 LLM step。
-func buildStep(sc llm.StepConfig, cfg *config.Config, reg *prompt.Registry, opts BuilderOptions) (*llm.Step, error) {
+func buildStep(sc llm.StepConfig, cfg *config.Config, reg *prompt.Registry, rl *llm.RateLimiter, opts BuilderOptions) (*llm.Step, error) {
 	var ref llm.PromptRef
 	if sc.Prompt.Rewrite != "" {
 		p, ok := reg.Get(sc.Prompt.Rewrite)
@@ -165,32 +177,17 @@ func buildStep(sc llm.StepConfig, cfg *config.Config, reg *prompt.Registry, opts
 	}
 
 	// provider 解析：step 未指定时用 llm.providers.default。
-	pc, ok := cfg.LLM.Providers["default"]
+	providerName := sc.Provider
+	if providerName == "" {
+		providerName = "default"
+	}
+	pc, ok := cfg.LLM.Providers[providerName]
 	if !ok {
-		return nil, fmt.Errorf("缺少 llm.providers.default 配置")
+		return nil, fmt.Errorf("缺少 llm.providers.%s 配置", providerName)
 	}
 	pc = sc.Overrides.Apply(pc)
-	if pc.APIKey == "" && pc.Type != "ollama" {
-		return nil, fmt.Errorf("provider api_key 为空（检查 ${VAR} 环境变量是否已设置）")
-	}
 
-	factory := opts.ProviderFactory
-	if factory == nil {
-		factory = func(pc llm.ProviderConfig) (llm.Provider, error) {
-			return providers.New(pc)
-		}
-	}
-	provider, err := factory(pc)
-	if err != nil {
-		return nil, err
-	}
-
-	rl, err := llm.NewRateLimiter(cfg.LLM.RateLimit)
-	if err != nil {
-		return nil, err
-	}
-
-	return &llm.Step{
+	step := &llm.Step{
 		Name:       sc.Name,
 		Action:     sc.Action,
 		Target:     sc.Target,
@@ -198,10 +195,43 @@ func buildStep(sc llm.StepConfig, cfg *config.Config, reg *prompt.Registry, opts
 		Filter:     sc.Filter,
 		PromptRef:  ref,
 		Params:     sc.Params,
-		Provider:   provider,
 		RateLimit:  rl,
 		MaxRetries: pc.MaxRetries,
-	}, nil
+	}
+
+	// dry-run 只报告计划，不需要真实 provider 或 API key。
+	if !opts.DryRun {
+		if pc.APIKey == "" && pc.Type != "ollama" {
+			return nil, fmt.Errorf("provider api_key 为空（检查 ${VAR} 环境变量是否已设置）")
+		}
+		factory := opts.ProviderFactory
+		if factory == nil {
+			factory = func(pc llm.ProviderConfig) (llm.Provider, error) {
+				return providers.New(pc)
+			}
+		}
+		provider, err := factory(pc)
+		if err != nil {
+			return nil, err
+		}
+		step.Provider = provider
+	}
+
+	// 提示词建议温度低于 step overrides；provider 配置是兜底值。
+	step.DetectTemperature = promptTemperature(ref.Detect)
+	step.RewriteTemperature = promptTemperature(ref.Rewrite)
+	if sc.Overrides.Temperature != nil {
+		step.DetectTemperature = sc.Overrides.Temperature
+		step.RewriteTemperature = sc.Overrides.Temperature
+	}
+	return step, nil
+}
+
+func promptTemperature(p *prompt.Prompt) *float64 {
+	if p != nil && p.Suggested.Temperature != nil {
+		return p.Suggested.Temperature
+	}
+	return nil
 }
 
 func buildRules(names []string, rulesCfg map[string]config.RuleParams) ([]rule.Rule, error) {
@@ -236,7 +266,9 @@ func (p *Pipeline) Process(ctx *Context, source []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("preprocess %s: %w", r.Name(), err)
 		}
-		current = result
+		if result != nil {
+			current = result
+		}
 	}
 
 	// ② LLM 步骤（串行，保证 prefix cache 复用）。
@@ -269,7 +301,9 @@ func (p *Pipeline) Process(ctx *Context, source []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("postprocess %s: %w", r.Name(), err)
 		}
-		current = result
+		if result != nil {
+			current = result
+		}
 	}
 	return current, nil
 }

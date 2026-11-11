@@ -11,6 +11,8 @@ import (
 	"github.com/RobiNexy/de-llm/pkg/config"
 	"github.com/RobiNexy/de-llm/pkg/llm"
 	"github.com/RobiNexy/de-llm/pkg/llm/prompt"
+	markdown "github.com/RobiNexy/de-llm/pkg/parser"
+	"github.com/RobiNexy/de-llm/pkg/rule"
 )
 
 // mockFactory 返回按调用顺序响应的 mock provider。
@@ -335,5 +337,146 @@ func TestPromptDirsOverride(t *testing.T) {
 	}
 	if p.Description != "自定义覆盖版" {
 		t.Errorf("目录覆盖未生效: %s", p.Description)
+	}
+}
+
+func TestBuildDryRunWithoutAPIKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.LLM.Providers["default"] = func() llm.ProviderConfig {
+		pc := cfg.LLM.Providers["default"]
+		pc.APIKey = ""
+		return pc
+	}()
+	p, err := Build(cfg, "full", BuilderOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run 不应要求 API key: %v", err)
+	}
+	if len(p.Steps()) != 3 {
+		t.Fatalf("full profile 步骤数 %d != 3", len(p.Steps()))
+	}
+	for _, s := range p.Steps() {
+		if s.Provider != nil {
+			t.Errorf("dry-run 步骤 %q 不应构造 provider", s.Name)
+		}
+	}
+}
+
+func TestBuildUsesPromptSuggestedTemperature(t *testing.T) {
+	cfg := config.Default()
+	cfg.LLM.Providers["default"] = func() llm.ProviderConfig {
+		pc := cfg.LLM.Providers["default"]
+		pc.APIKey = ""
+		return pc
+	}()
+	p, err := Build(cfg, "full", BuilderOptions{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := p.Steps()
+	if steps[1].RewriteTemperature == nil || *steps[1].RewriteTemperature != 0.5 {
+		t.Errorf("rewrite_heading 温度 = %v, 期望 0.5", steps[1].RewriteTemperature)
+	}
+	if steps[2].DetectTemperature == nil || *steps[2].DetectTemperature != 0.3 {
+		t.Errorf("detect_contrasting 温度 = %v, 期望 0.3", steps[2].DetectTemperature)
+	}
+	if steps[2].RewriteTemperature == nil || *steps[2].RewriteTemperature != 0.7 {
+		t.Errorf("rewrite_contrasting 温度 = %v, 期望 0.7", steps[2].RewriteTemperature)
+	}
+}
+
+func TestBuildSharesRateLimiter(t *testing.T) {
+	cfg := config.Default()
+	cfg.Profiles["two"] = &config.Profile{
+		LLMSteps: []llm.StepConfig{
+			{Name: "a", Action: llm.ActionFullRewrite, Prompt: llm.PromptCfg{Rewrite: "compress"}},
+			{Name: "b", Action: llm.ActionFullRewrite, Prompt: llm.PromptCfg{Rewrite: "compress"}},
+		},
+	}
+	cfg.LLM.RateLimit = "60/minute"
+	factory := mockFactory(llm.MockResponse{Content: "x"})
+	p, err := Build(cfg, "two", BuilderOptions{ProviderFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := p.Steps()
+	if len(steps) != 2 {
+		t.Fatalf("步骤数 %d != 2", len(steps))
+	}
+	if steps[0].RateLimit == nil || steps[0].RateLimit != steps[1].RateLimit {
+		t.Error("所有步骤应共享同一个全局限流器")
+	}
+}
+
+func TestBuildPerStepProvider(t *testing.T) {
+	cfg := config.Default()
+	alt := cfg.LLM.Providers["default"]
+	alt.Model = "alt-model"
+	alt.APIKey = "test-key"
+	cfg.LLM.Providers["alt"] = alt
+	cfg.Profiles["p"] = &config.Profile{
+		LLMSteps: []llm.StepConfig{
+			{Name: "s", Action: llm.ActionFullRewrite, Provider: "alt", Prompt: llm.PromptCfg{Rewrite: "compress"}},
+		},
+	}
+	var gotModel string
+	factory := func(pc llm.ProviderConfig) (llm.Provider, error) {
+		gotModel = pc.Model
+		return llm.NewMockProvider(llm.MockResponse{Content: "x"}), nil
+	}
+	if _, err := Build(cfg, "p", BuilderOptions{ProviderFactory: factory}); err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "alt-model" {
+		t.Errorf("使用的 provider model = %q, 期望 alt-model", gotModel)
+	}
+}
+
+func TestBuildLocalOnlyIgnoresBrokenPrompts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "broken.md"), []byte("not a prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.LLM.Prompts.Dirs = []string{dir}
+	if _, err := Build(cfg, "default", BuilderOptions{}); err != nil {
+		t.Errorf("本地规则模式不应加载外部提示词: %v", err)
+	}
+}
+
+type nilRule struct{}
+
+func (nilRule) Name() string        { return "nil" }
+func (nilRule) Description() string { return "returns nil" }
+func (nilRule) Transform(ctx rule.Context, rm *markdown.RegionMap) ([]byte, error) {
+	return nil, nil
+}
+
+func TestProcessNilRuleResultKeepsDocument(t *testing.T) {
+	p := &Pipeline{preprocess: []rule.Rule{nilRule{}}}
+	result, err := p.Process(NewContext(context.Background(), false), []byte("正文。\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != "正文。\n" {
+		t.Errorf("nil 规则结果应保持原文: %q", result)
+	}
+}
+
+func TestPromptDirRecursive(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: nested_prompt\ndescription: nested\nversion: 1\nparams:\n  required: []\n---\n\n正文\n"
+	if err := os.WriteFile(filepath.Join(sub, "nested.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := prompt.NewRegistry()
+	if err := reg.LoadDirs([]string{dir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Get("nested_prompt"); !ok {
+		t.Error("递归目录中的提示词未加载")
 	}
 }

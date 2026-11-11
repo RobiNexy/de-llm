@@ -85,9 +85,18 @@ func estimateStep(step *llm.Step, source []byte) tokenEstimate {
 	case llm.ActionFullRewrite:
 		ratio := 1.3
 		if step.Params != nil {
-			if v, ok := step.Params["expand_ratio"].(string); ok {
+			switch v := step.Params["expand_ratio"].(type) {
+			case string:
 				if f, err := parseRatio(v); err == nil {
 					ratio = f
+				}
+			case float64:
+				if v > 0 {
+					ratio = v
+				}
+			case int:
+				if v > 0 {
+					ratio = float64(v)
 				}
 			}
 		}
