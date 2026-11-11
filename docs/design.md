@@ -725,8 +725,9 @@ func (r *ShiftHeadingsRule) Transform(regionMap *RegionMap) ([]byte, error) {
 | U+201C..U+201D | 中文双引号 " " |
 | U+2018..U+2019 | 中文单引号 ' ' |
 
-**中文标点与 ASCII 的规则：**
-- 中文标点（含弯引号）和 ASCII 字母/数字之间：插入空格
+**中文标点与 ASCII 的规则（实现裁决）：**
+- 只有汉字（CJK Unified Ideographs、Extension A、Compatibility）触发插入
+- 中文标点（含弯引号）与 ASCII 字母/数字相邻时保持原样
 - 中文标点和中文之间：不插入
 - ASCII 标点和任何字符之间：不插入
 

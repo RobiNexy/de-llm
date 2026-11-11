@@ -74,6 +74,11 @@ Logs go to stderr and never contaminate document output. Use `--quiet` to
 hide non-error messages and `--log-level debug|info|warn|error` to select the
 log level.
 
+Write and output modes are mutually exclusive: `-i`, `-o`, and `--diff` cannot
+be combined. `--dry-run` cannot be combined with them or with `--format json`.
+For `--format json`, one file produces one object and multiple files produce an
+array.
+
 ## Built-in rules
 
 | Rule | Function |
@@ -82,7 +87,7 @@ log level.
 | `remove_separators` | Remove Markdown horizontal rules without touching front matter or Setext headings |
 | `shift_headings` | Shift ATX heading levels with clamp/error/skip overflow handling |
 | `indent` | Add two ideographic spaces to paragraph starts |
-| `pangu` | Add spaces between CJK and Latin letters or digits |
+| `pangu` | Add spaces between Han characters and Latin letters or digits; leave Chinese punctuation next to ASCII unchanged |
 | `emphasis_space` | Add spaces between emphasis markers and adjacent CJK text |
 
 The default profile runs local rules only, so an API key is not required.
@@ -128,6 +133,10 @@ llm:
       model: deepseek-chat
 ```
 
+Each LLM step may select a provider from `llm.providers` with
+`provider: <name>`; omitting it uses `default`. Explicit zero values such as
+`temperature: 0` are preserved.
+
 Per-document overrides are supported through front matter:
 
 ```markdown
@@ -141,7 +150,8 @@ dellm:
 ## Custom prompts
 
 Add Markdown templates with YAML front matter under the project `prompts/`
-directory to add or override prompts:
+directory to add or override prompts. Directories are scanned recursively;
+relative paths are resolved against the configuration file's directory:
 
 ```markdown
 ---

@@ -73,6 +73,10 @@ dellm list-prompts                       # 列出提示词
 日志写入 stderr，不污染文档输出。使用 `--quiet` 静默非错误信息，使用
 `--log-level debug|info|warn|error` 控制日志级别。
 
+写入与输出模式互斥：`-i`、`-o`、`--diff` 不能两两同时使用；`--dry-run`
+不能与它们或 `--format json` 同时使用。`--format json` 单文件输出一个对象，
+多文件输出一个数组。
+
 ## 默认规则
 
 | 规则 | 作用 |
@@ -81,7 +85,7 @@ dellm list-prompts                       # 列出提示词
 | `remove_separators` | 删除 Markdown 水平分隔线，保护 front matter 和 Setext 标题 |
 | `shift_headings` | 调整 ATX 标题层级，支持越界 clamp/error/skip |
 | `indent` | 在正文段落首行插入两个全角空格 |
-| `pangu` | 在中文与英文、数字之间插入空格 |
+| `pangu` | 在汉字与英文、数字之间插入空格；中文标点与 ASCII 相邻时保持原样 |
 | `emphasis_space` | 在强调标记与中文相邻时补空格 |
 
 默认 profile 只执行本地规则，因此不配置 LLM 也可以直接使用。
@@ -127,6 +131,9 @@ llm:
       model: deepseek-chat
 ```
 
+每个 LLM step 可以用 `provider: <name>` 选择 `llm.providers` 中的 provider；
+省略时使用 `default`。`temperature: 0` 等显式零值会按原值生效。
+
 文档可以通过 front matter 覆盖 profile、规则选择和规则参数：
 
 ```markdown
@@ -139,7 +146,7 @@ dellm:
 
 ## 自定义提示词
 
-在项目的 `prompts/` 目录放置带 YAML front matter 的 Markdown 模板即可覆盖或新增提示词：
+在项目的 `prompts/` 目录放置带 YAML front matter 的 Markdown 模板即可覆盖或新增提示词。目录会递归扫描；相对路径以配置文件所在目录为基准：
 
 ```markdown
 ---
