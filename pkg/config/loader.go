@@ -81,6 +81,7 @@ func Load(opts Options) (*Config, error) {
 	}
 
 	expandEnv(cfg)
+	resolvePromptDirs(cfg)
 	cfg.ProfileName = "default"
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -149,6 +150,9 @@ func (c *Config) mergeOver(over *Config) {
 			c.Profiles[name] = &cp
 		}
 	}
+	if c.Rules == nil {
+		c.Rules = map[string]RuleParams{}
+	}
 	mergeRuleMaps(c.Rules, over.Rules)
 	if len(over.LLM.Providers) > 0 {
 		if c.LLM.Providers == nil {
@@ -160,7 +164,7 @@ func (c *Config) mergeOver(over *Config) {
 				c.LLM.Providers[name] = pc
 				continue
 			}
-			// 深度合并：非零字段覆盖。
+			// 深度合并：显式出现的字段覆盖，包括显式零值。
 			if pc.Type != "" {
 				base.Type = pc.Type
 			}
@@ -173,17 +177,21 @@ func (c *Config) mergeOver(over *Config) {
 			if pc.Model != "" {
 				base.Model = pc.Model
 			}
-			if pc.Temperature != 0 {
+			if pc.TemperatureSet {
 				base.Temperature = pc.Temperature
+				base.TemperatureSet = true
 			}
-			if pc.MaxTokens != 0 {
+			if pc.MaxTokensSet {
 				base.MaxTokens = pc.MaxTokens
+				base.MaxTokensSet = true
 			}
-			if pc.Timeout != 0 {
+			if pc.TimeoutSet {
 				base.Timeout = pc.Timeout
+				base.TimeoutSet = true
 			}
-			if pc.MaxRetries != 0 {
+			if pc.MaxRetriesSet {
 				base.MaxRetries = pc.MaxRetries
+				base.MaxRetriesSet = true
 			}
 			c.LLM.Providers[name] = base
 		}
@@ -252,14 +260,38 @@ func profileNames(c *Config) []string {
 	return out
 }
 
-// expandEnv 展开 provider api_key 中的 ${VAR}。
-// 未设置的变量展开为空串（调用方据此跳过该 provider）。
+// expandEnv 展开 provider 字符串字段中的 ${VAR} 与 $VAR。
 func expandEnv(c *Config) {
 	for name, pc := range c.LLM.Providers {
-		if strings.Contains(pc.APIKey, "${") {
-			pc.APIKey = os.ExpandEnv(pc.APIKey)
-			c.LLM.Providers[name] = pc
+		pc.APIKey = os.ExpandEnv(pc.APIKey)
+		pc.BaseURL = os.ExpandEnv(pc.BaseURL)
+		pc.Model = os.ExpandEnv(pc.Model)
+		c.LLM.Providers[name] = pc
+	}
+}
+
+// resolvePromptDirs 展开 ~ 与环境变量，并把相对路径解析到配置文件目录。
+// 这样从任意子目录启动 CLI 时，项目提示词目录仍指向项目配置所在位置。
+func resolvePromptDirs(c *Config) {
+	base := ""
+	if c.SourceFile != "" {
+		base = filepath.Dir(c.SourceFile)
+	}
+	home, _ := os.UserHomeDir()
+	for i, dir := range c.LLM.Prompts.Dirs {
+		dir = os.ExpandEnv(dir)
+		if dir == "~" {
+			dir = home
+		} else if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
+			dir = filepath.Join(home, dir[2:])
 		}
+		if !filepath.IsAbs(dir) && base != "" {
+			dir = filepath.Join(base, dir)
+		}
+		if dir != "" {
+			dir = filepath.Clean(dir)
+		}
+		c.LLM.Prompts.Dirs[i] = dir
 	}
 }
 

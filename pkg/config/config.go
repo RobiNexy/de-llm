@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/RobiNexy/de-llm/pkg/llm"
+	"github.com/RobiNexy/de-llm/pkg/rule"
 )
 
 // Version 是当前配置格式的版本号。
@@ -71,8 +72,17 @@ type FrontMatterConfig struct {
 
 // Validate 检查配置的约束条件。
 func (c *Config) Validate() error {
+	if c.Version != 0 && c.Version != Version {
+		return fmt.Errorf("不支持的配置版本 %d（当前 %d）", c.Version, Version)
+	}
 	if c.LLM.OnFailure != "" && c.LLM.OnFailure != "preserve" && c.LLM.OnFailure != "fail" {
 		return fmt.Errorf("llm.on_failure 只支持 preserve/fail，得到 %q", c.LLM.OnFailure)
+	}
+	if c.LLM.Concurrency != 0 && c.LLM.Concurrency != 1 {
+		return fmt.Errorf("llm.concurrency 当前只支持 1，得到 %d", c.LLM.Concurrency)
+	}
+	if _, err := llm.NewRateLimiter(c.LLM.RateLimit); err != nil {
+		return fmt.Errorf("llm.rate_limit: %w", err)
 	}
 	for name, pc := range c.LLM.Providers {
 		if pc.Type == "" {
@@ -82,6 +92,18 @@ func (c *Config) Validate() error {
 		case "openai", "anthropic", "ollama":
 		default:
 			return fmt.Errorf("llm.providers.%s 的 type %q 不支持（openai/anthropic/ollama）", name, pc.Type)
+		}
+		if pc.BaseURL == "" {
+			return fmt.Errorf("llm.providers.%s 缺少 base_url", name)
+		}
+		if pc.MaxTokens < 0 {
+			return fmt.Errorf("llm.providers.%s.max_tokens 不能为负数", name)
+		}
+		if pc.MaxRetries < 0 {
+			return fmt.Errorf("llm.providers.%s.max_retries 不能为负数", name)
+		}
+		if pc.Timeout < 0 {
+			return fmt.Errorf("llm.providers.%s.timeout 不能为负数", name)
 		}
 	}
 	for pname, p := range c.Profiles {
@@ -97,18 +119,38 @@ func (c *Config) Validate() error {
 			if s.Action != llm.ActionRewrite && s.Action != llm.ActionFullRewrite {
 				return fmt.Errorf("llm_step %q 的 action %q 不支持（rewrite/full_rewrite）", s.Name, s.Action)
 			}
-			if s.Action == llm.ActionRewrite && s.Target == "" {
-				return fmt.Errorf("llm_step %q 的 action=rewrite 必须指定 target", s.Name)
+			if s.Prompt.Rewrite == "" {
+				return fmt.Errorf("llm_step %q 缺少 rewrite 提示词", s.Name)
+			}
+			if s.Detect && s.Prompt.Detect == "" {
+				return fmt.Errorf("llm_step %q 启用了 detect 但缺少 detect 提示词", s.Name)
+			}
+			if s.Action == llm.ActionRewrite {
+				switch s.Target {
+				case "paragraph", "heading", "list_item", "blockquote":
+				default:
+					return fmt.Errorf("llm_step %q 的 target %q 不支持（paragraph/heading/list_item/blockquote）", s.Name, s.Target)
+				}
+			}
+			if s.Provider == "" {
+				if _, ok := c.LLM.Providers["default"]; !ok {
+					return fmt.Errorf("llm_step %q 使用默认 provider，但缺少 llm.providers.default", s.Name)
+				}
+			} else if _, ok := c.LLM.Providers[s.Provider]; !ok {
+				return fmt.Errorf("llm_step %q 引用了未知 provider %q", s.Name, s.Provider)
+			}
+			if s.Filter != nil {
+				if s.Filter.MinLength < 0 || s.Filter.MaxLength < 0 {
+					return fmt.Errorf("llm_step %q 的 filter 长度不能为负数", s.Name)
+				}
+				if s.Filter.MinLength > 0 && s.Filter.MaxLength > 0 && s.Filter.MinLength > s.Filter.MaxLength {
+					return fmt.Errorf("llm_step %q 的 filter.min_length 不能大于 max_length", s.Name)
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// knownRule 报告规则名是否已注册（避免 import cycle 延迟检查）。
-var knownRules = map[string]bool{
-	"quotes": true, "remove_separators": true, "shift_headings": true,
-	"indent": true, "pangu": true, "emphasis_space": true,
-}
-
-func knownRule(name string) bool { return knownRules[name] }
+// knownRule 报告规则名是否已注册。
+func knownRule(name string) bool { return rule.Exists(name) }

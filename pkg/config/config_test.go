@@ -196,3 +196,98 @@ func TestValidateRejectsBadAction(t *testing.T) {
 		t.Error("应拒绝未知 action")
 	}
 }
+
+func TestProviderZeroTemperatureOverride(t *testing.T) {
+	p := writeTemp(t, "dellm.yaml", `
+version: 1
+llm:
+  providers:
+    default:
+      temperature: 0
+`)
+	cfg, err := Load(Options{ConfigPath: p, NoUserConfig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := cfg.LLM.Providers["default"]
+	if pc.Temperature != 0 {
+		t.Errorf("显式 temperature: 0 应保留，得到 %v", pc.Temperature)
+	}
+	if !pc.TemperatureSet {
+		t.Error("TemperatureSet 应为 true")
+	}
+}
+
+func TestCloneIsolation(t *testing.T) {
+	orig := Default()
+	clone := Clone(orig)
+	clone.Rules["quotes"]["single_quotes"] = false
+	clone.Profiles["default"].Postprocess = []string{"pangu"}
+	clone.LLM.Prompts.Dirs[0] = "/tmp/other"
+
+	if orig.Rules["quotes"]["single_quotes"] != true {
+		t.Error("Clone 修改污染了原 Rules")
+	}
+	if len(orig.Profiles["default"].Postprocess) != 4 {
+		t.Error("Clone 修改污染了原 Profile")
+	}
+	if orig.LLM.Prompts.Dirs[0] != "./prompts" {
+		t.Error("Clone 修改污染了原 Prompts.Dirs")
+	}
+}
+
+func TestValidateRejectsBadTarget(t *testing.T) {
+	cfg := Default()
+	cfg.Profiles["bad"] = &Profile{
+		LLMSteps: []llm.StepConfig{
+			{Name: "s", Action: llm.ActionRewrite, Target: "sentence", Prompt: llm.PromptCfg{Rewrite: "compress"}},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("应拒绝未知 target")
+	}
+}
+
+func TestValidateRejectsBadConcurrency(t *testing.T) {
+	cfg := Default()
+	cfg.LLM.Concurrency = 4
+	if err := cfg.Validate(); err == nil {
+		t.Error("应拒绝 concurrency != 1")
+	}
+}
+
+func TestValidateRejectsUnknownProvider(t *testing.T) {
+	cfg := Default()
+	cfg.Profiles["bad"] = &Profile{
+		LLMSteps: []llm.StepConfig{
+			{Name: "s", Action: llm.ActionFullRewrite, Provider: "missing", Prompt: llm.PromptCfg{Rewrite: "compress"}},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("应拒绝未知 provider")
+	}
+}
+
+func TestValidateRejectsUnsupportedVersion(t *testing.T) {
+	cfg := Default()
+	cfg.Version = 99
+	if err := cfg.Validate(); err == nil {
+		t.Error("应拒绝不支持的配置版本")
+	}
+}
+
+func TestResolvePromptDirsRelativeToConfig(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "dellm.yaml")
+	if err := os.WriteFile(p, []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(Options{ConfigPath: p, NoUserConfig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "prompts")
+	if len(cfg.LLM.Prompts.Dirs) == 0 || cfg.LLM.Prompts.Dirs[0] != want {
+		t.Errorf("prompts dir = %v, 期望 %q", cfg.LLM.Prompts.Dirs, want)
+	}
+}

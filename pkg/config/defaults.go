@@ -56,14 +56,18 @@ func Default() *Config {
 // api_key 通过 ${VAR} 环境变量展开（加载阶段处理）。
 func defaultProvider() llm.ProviderConfig {
 	return llm.ProviderConfig{
-		Type:        "openai",
-		BaseURL:     "https://api.openai.com/v1",
-		APIKey:      "${DELLM_API_KEY}",
-		Model:       "gpt-4o",
-		Temperature: 0.3,
-		MaxTokens:   4096,
-		Timeout:     llm.Duration(60_000_000_000), // 60s
-		MaxRetries:  3,
+		Type:           "openai",
+		BaseURL:        "https://api.openai.com/v1",
+		APIKey:         "${DELLM_API_KEY}",
+		Model:          "gpt-4o",
+		Temperature:    0.3,
+		MaxTokens:      4096,
+		Timeout:        llm.Duration(60_000_000_000), // 60s
+		MaxRetries:     3,
+		TemperatureSet: true,
+		MaxTokensSet:   true,
+		TimeoutSet:     true,
+		MaxRetriesSet:  true,
 	}
 }
 
