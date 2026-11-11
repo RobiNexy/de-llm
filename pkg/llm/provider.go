@@ -4,6 +4,8 @@ package llm
 import (
 	"context"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Provider 是 LLM 提供方的统一抽象（设计文档 §7.11）。
@@ -23,7 +25,7 @@ const (
 type CompletionRequest struct {
 	Model          string
 	Messages       []Message
-	Temperature    float64
+	Temperature    *float64 // nil 表示使用 provider 配置
 	MaxTokens      int
 	ResponseFormat ResponseFormat
 }
@@ -59,14 +61,45 @@ type ProviderConfig struct {
 	MaxTokens   int      `yaml:"max_tokens"`
 	Timeout     Duration `yaml:"timeout"`
 	MaxRetries  int      `yaml:"max_retries"`
+
+	// 显式的零值也是有效配置（例如 temperature: 0、max_retries: 0）。
+	// 这些标志只由 YAML 解码或默认值设置，不参与序列化。
+	TemperatureSet bool `yaml:"-"`
+	MaxTokensSet   bool `yaml:"-"`
+	TimeoutSet     bool `yaml:"-"`
+	MaxRetriesSet  bool `yaml:"-"`
+}
+
+// UnmarshalYAML 记录哪些数值字段在配置文件中显式出现，避免合并时把
+// 显式零值误判为“未设置”。
+func (p *ProviderConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plain ProviderConfig
+	var raw plain
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*p = ProviderConfig(raw)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "temperature":
+			p.TemperatureSet = true
+		case "max_tokens":
+			p.MaxTokensSet = true
+		case "timeout":
+			p.TimeoutSet = true
+		case "max_retries":
+			p.MaxRetriesSet = true
+		}
+	}
+	return nil
 }
 
 // Overrides 是 llm_step 级别的 provider 参数覆盖。
 type Overrides struct {
-	Model       string   `yaml:"model"`
-	Temperature *float64 `yaml:"temperature"`
-	MaxTokens   int      `yaml:"max_tokens"`
-	Timeout     Duration `yaml:"timeout"`
+	Model       string    `yaml:"model"`
+	Temperature *float64  `yaml:"temperature"`
+	MaxTokens   *int      `yaml:"max_tokens"`
+	Timeout     *Duration `yaml:"timeout"`
 }
 
 // Apply 将覆盖项应用到配置副本。
@@ -77,12 +110,15 @@ func (o Overrides) Apply(base ProviderConfig) ProviderConfig {
 	}
 	if o.Temperature != nil {
 		c.Temperature = *o.Temperature
+		c.TemperatureSet = true
 	}
-	if o.MaxTokens > 0 {
-		c.MaxTokens = o.MaxTokens
+	if o.MaxTokens != nil {
+		c.MaxTokens = *o.MaxTokens
+		c.MaxTokensSet = true
 	}
-	if o.Timeout > 0 {
-		c.Timeout = o.Timeout
+	if o.Timeout != nil {
+		c.Timeout = *o.Timeout
+		c.TimeoutSet = true
 	}
 	return c
 }

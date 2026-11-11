@@ -17,14 +17,16 @@ import (
 func New(cfg llm.ProviderConfig) (llm.Provider, error) {
 	switch cfg.Type {
 	case "openai":
-		return &OpenAI{cfg: cfg}, nil
+		return &OpenAI{cfg: cfg, client: newHTTPClient()}, nil
 	case "anthropic":
-		return &Anthropic{cfg: cfg}, nil
+		return &Anthropic{cfg: cfg, client: newHTTPClient()}, nil
 	case "ollama":
-		return &Ollama{cfg: cfg}, nil
+		return &Ollama{cfg: cfg, client: newHTTPClient()}, nil
 	}
 	return nil, fmt.Errorf("不支持的 provider type: %q", cfg.Type)
 }
+
+func newHTTPClient() *http.Client { return &http.Client{} }
 
 // timeout 为请求上下文附加超时。
 func timeoutCtx(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
@@ -39,13 +41,14 @@ func timeoutCtx(ctx context.Context, d time.Duration) (context.Context, context.
 // OpenAI 支持 /chat/completions；JSON mode 通过 response_format。
 // 该接口同时兼容 DeepSeek、Moonshot、Together 等 OpenAI 风格 API。
 type OpenAI struct {
-	cfg llm.ProviderConfig
+	cfg    llm.ProviderConfig
+	client *http.Client
 }
 
 type openaiRequest struct {
 	Model          string          `json:"model"`
 	Messages       []openaiMessage `json:"messages"`
-	Temperature    float64         `json:"temperature,omitempty"`
+	Temperature    *float64        `json:"temperature,omitempty"`
 	MaxTokens      int             `json:"max_tokens,omitempty"`
 	ResponseFormat *struct {
 		Type string `json:"type"`
@@ -77,13 +80,14 @@ func (p *OpenAI) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 	defer cancel()
 
 	payload := openaiRequest{
-		Model:       firstNonEmpty(req.Model, p.cfg.Model),
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Model:     firstNonEmpty(req.Model, p.cfg.Model),
+		MaxTokens: req.MaxTokens,
 	}
-	if payload.Temperature == 0 {
-		payload.Temperature = p.cfg.Temperature
+	temperature := p.cfg.Temperature
+	if req.Temperature != nil {
+		temperature = *req.Temperature
 	}
+	payload.Temperature = &temperature
 	if payload.MaxTokens == 0 {
 		payload.MaxTokens = p.cfg.MaxTokens
 	}
@@ -110,7 +114,7 @@ func (p *OpenAI) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 		httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	}
 
-	resp, err := llm.DoWithRetry(ctx, p.client(), httpReq, body, p.cfg.MaxRetries)
+	resp, err := llm.DoWithRetry(ctx, p.client, httpReq, body, p.cfg.MaxRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -142,14 +146,13 @@ func (p *OpenAI) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 	return out, nil
 }
 
-func (p *OpenAI) client() *http.Client { return &http.Client{} }
-
 // --- Anthropic -------------------------------------------------------
 
 // Anthropic 使用 /v1/messages；无原生 JSON mode，
 // JSON 输出靠提示词约束 + 解析层剥离（设计文档 §7.11）。
 type Anthropic struct {
-	cfg llm.ProviderConfig
+	cfg    llm.ProviderConfig
+	client *http.Client
 }
 
 type anthropicRequest struct {
@@ -157,7 +160,7 @@ type anthropicRequest struct {
 	Messages    []anthropicMessage `json:"messages"`
 	System      string             `json:"system,omitempty"`
 	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature,omitempty"`
+	Temperature *float64           `json:"temperature,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -193,8 +196,9 @@ func (p *Anthropic) Complete(ctx context.Context, req *llm.CompletionRequest) (*
 		payload.MaxTokens = 4096
 	}
 	payload.Temperature = req.Temperature
-	if payload.Temperature == 0 {
-		payload.Temperature = p.cfg.Temperature
+	if payload.Temperature == nil {
+		temperature := p.cfg.Temperature
+		payload.Temperature = &temperature
 	}
 	for _, m := range req.Messages {
 		if m.Role == "system" {
@@ -219,7 +223,7 @@ func (p *Anthropic) Complete(ctx context.Context, req *llm.CompletionRequest) (*
 		httpReq.Header.Set("x-api-key", p.cfg.APIKey)
 	}
 
-	resp, err := llm.DoWithRetry(ctx, &http.Client{}, httpReq, body, p.cfg.MaxRetries)
+	resp, err := llm.DoWithRetry(ctx, p.client, httpReq, body, p.cfg.MaxRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +256,8 @@ func (p *Anthropic) Complete(ctx context.Context, req *llm.CompletionRequest) (*
 
 // Ollama 使用本地 /api/chat；format: "json" 开启 JSON mode。
 type Ollama struct {
-	cfg llm.ProviderConfig
+	cfg    llm.ProviderConfig
+	client *http.Client
 }
 
 type ollamaRequest struct {
@@ -269,8 +274,8 @@ type ollamaMessage struct {
 }
 
 type ollamaOptions struct {
-	Temperature float64 `json:"temperature,omitempty"`
-	NumPredict  int     `json:"num_predict,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	NumPredict  int      `json:"num_predict,omitempty"`
 }
 
 type ollamaResponse struct {
@@ -280,6 +285,8 @@ type ollamaResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+	PromptEvalCount int `json:"prompt_eval_count"`
+	EvalCount       int `json:"eval_count"`
 }
 
 func (p *Ollama) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
@@ -290,13 +297,14 @@ func (p *Ollama) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 		Model:  firstNonEmpty(req.Model, p.cfg.Model),
 		Stream: false,
 		Options: ollamaOptions{
-			Temperature: req.Temperature,
-			NumPredict:  req.MaxTokens,
+			NumPredict: req.MaxTokens,
 		},
 	}
-	if payload.Options.Temperature == 0 {
-		payload.Options.Temperature = p.cfg.Temperature
+	temperature := p.cfg.Temperature
+	if req.Temperature != nil {
+		temperature = *req.Temperature
 	}
+	payload.Options.Temperature = &temperature
 	if payload.Options.NumPredict == 0 {
 		payload.Options.NumPredict = p.cfg.MaxTokens
 	}
@@ -318,7 +326,7 @@ func (p *Ollama) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := llm.DoWithRetry(ctx, &http.Client{}, httpReq, body, p.cfg.MaxRetries)
+	resp, err := llm.DoWithRetry(ctx, p.client, httpReq, body, p.cfg.MaxRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +348,16 @@ func (p *Ollama) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm
 	out.Usage.PromptTokens = orr.Usage.PromptTokens
 	out.Usage.CompletionTokens = orr.Usage.CompletionTokens
 	out.Usage.TotalTokens = orr.Usage.TotalTokens
+	// Ollama 原生字段是 prompt_eval_count / eval_count；部分兼容层使用 usage。
+	if out.Usage.PromptTokens == 0 {
+		out.Usage.PromptTokens = orr.PromptEvalCount
+	}
+	if out.Usage.CompletionTokens == 0 {
+		out.Usage.CompletionTokens = orr.EvalCount
+	}
+	if out.Usage.TotalTokens == 0 {
+		out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CompletionTokens
+	}
 	return out, nil
 }
 
